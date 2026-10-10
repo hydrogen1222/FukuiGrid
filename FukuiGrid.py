@@ -43,9 +43,38 @@ def read_file_info(FILE1):
     return NATOMS, GRID, POINTS, alattvec, blattvec, clattvec, skiplines, MAXROWS
 
 def process_file(filename, skip_lines, max_rows, points):
-    df = pd.read_fwf(filename, colspecs='infer', skiprows=skip_lines, nrows=max_rows)
-    data = df.to_numpy().flatten('C')[:points]
-    return data
+    """Read exactly the first CHGCAR/LOCPOT scalar grid, preserving signs.
+
+    The dimension line is at zero-based index `skip_lines` (from
+    read_file_info); the scalar samples start on the following line.
+    Do not infer fixed-width columns: the writer emits whitespace-separated
+    numbers with sign-dependent widths, which can drop minus signs.
+    """
+    if points <= 0 or skip_lines < 0 or max_rows <= 0:
+        raise ValueError("Invalid volumetric grid dimensions")
+    data = []
+    with open(filename, encoding="utf-8") as fp:
+        for _ in range(skip_lines + 1):
+            if not fp.readline():
+                raise ValueError("Truncated volumetric grid header")
+        for line in fp:
+            for token in line.split():
+                if len(data) == points:
+                    break  # Do not read PAW augmentation or subsequent grids.
+                try:
+                    value = float(token.replace("D", "E").replace("d", "e"))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid volumetric sample {token!r} at index {len(data)}"
+                    ) from exc
+                if not math.isfinite(value):
+                    raise ValueError("Non-finite volumetric grid sample")
+                data.append(value)
+            if len(data) == points:
+                break
+    if len(data) != points:
+        raise ValueError(f"Truncated volumetric grid: {len(data)} of {points} samples")
+    return np.asarray(data, dtype=float)
 
 def calculate_fukui_and_r2(dn, CHG1, CHG2, CHG3, CHG4):
     density_matrix = np.vstack([CHG1, CHG2, CHG3, CHG4]).astype(float)
