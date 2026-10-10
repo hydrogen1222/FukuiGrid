@@ -43,9 +43,38 @@ def read_file_info(FILE1):
     return NATOMS, GRID, POINTS, alattvec, blattvec, clattvec, skiplines, MAXROWS
 
 def process_file(filename, skip_lines, max_rows, points):
-    df = pd.read_fwf(filename, colspecs='infer', skiprows=skip_lines, nrows=max_rows)
-    data = df.to_numpy().flatten('C')[:points]
-    return data
+    """Read exactly the first CHGCAR/LOCPOT scalar grid, preserving signs.
+
+    The dimension line is at zero-based index `skip_lines` (from
+    read_file_info); the scalar samples start on the following line.
+    Do not infer fixed-width columns: the writer emits whitespace-separated
+    numbers with sign-dependent widths, which can drop minus signs.
+    """
+    if points <= 0 or skip_lines < 0 or max_rows <= 0:
+        raise ValueError("Invalid volumetric grid dimensions")
+    data = []
+    with open(filename, encoding="utf-8") as fp:
+        for _ in range(skip_lines + 1):
+            if not fp.readline():
+                raise ValueError("Truncated volumetric grid header")
+        for line in fp:
+            for token in line.split():
+                if len(data) == points:
+                    break  # Do not read PAW augmentation or subsequent grids.
+                try:
+                    value = float(token.replace("D", "E").replace("d", "e"))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid volumetric sample {token!r} at index {len(data)}"
+                    ) from exc
+                if not math.isfinite(value):
+                    raise ValueError("Non-finite volumetric grid sample")
+                data.append(value)
+            if len(data) == points:
+                break
+    if len(data) != points:
+        raise ValueError(f"Truncated volumetric grid: {len(data)} of {points} samples")
+    return np.asarray(data, dtype=float)
 
 def calculate_fukui_and_r2(dn, CHG1, CHG2, CHG3, CHG4):
     density_matrix = np.vstack([CHG1, CHG2, CHG3, CHG4]).astype(float)
@@ -68,20 +97,11 @@ def write_fukui_file(FILE1, NATOMS, fukui, filename):
                 else:
                     break
 
-        # Ahora procesamos y escribimos los datos de 'fukui'
-        num_full_rows = fukui.size // 5
-        last_row_size = fukui.size % 5
-        
-        if last_row_size == 0:
-            fukui_matrix = fukui.reshape(-1, 5)
-        else:
-            fukui_matrix = np.zeros((num_full_rows + 1, 5))
-            fukui_matrix[:num_full_rows] = fukui[:num_full_rows * 5].reshape(-1, 5)
-            fukui_matrix[-1, :last_row_size] = fukui[num_full_rows * 5:]
-        
-        # Escribir los datos de 'fukui' en el archivo
-        for row in fukui_matrix:
-            formatted_row = " ".join(f"{value: .11E}" for value in row if value != 0)
+        # Write all actual grid points, including true zeros.
+        # Slice the final row rather than padding it with artificial zeros.
+        for start in range(0, fukui.size, 5):
+            row = fukui[start:start + 5]
+            formatted_row = " ".join(f"{value: .11E}" for value in row)
             FUKUIFILE.write(formatted_row + "\n")
     print('file saved: ',filename)
     return filename
